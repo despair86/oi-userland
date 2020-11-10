@@ -1,0 +1,14 @@
+diff --git a/Makefile b/Makefile
+index bfdcfb0e..a67101a4 100644
+--- a/Makefile
++++ b/Makefile
+@@ -37,6 +37,9 @@ man:
+ html:
+ 	$(MAKE) FAIL_WARN=$(FAIL_WARN) -C docs html
+ 
++install:
++	python3 setup.py --prefix $(DESTDIR)/usr linux-package --update-check-interval=0 --libdir-name=lib/amd64
++
+ linkcheck:
+ 	$(MAKE) FAIL_WARN=$(FAIL_WARN) -C docs linkcheck
+ 

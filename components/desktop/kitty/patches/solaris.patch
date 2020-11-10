@@ -1,0 +1,165 @@
+This is the GCC variant of https://gist.github.com/despair86/4bec2de7c096feba2415b052604a91b4
+which was adapted from the original which specified studio 12.6 (I needed python 3.6+ a bit
+sooner. At the time we only had 32-bit python 3.4, and 64-bit 3.5, and I'd compiled 3.8 with
+cc instead of gcc)
+-rick
+
+diff --git a/build-terminfo b/build-terminfo
+index 3fbae33b..b5ccf072 100755
+--- a/build-terminfo
++++ b/build-terminfo
+@@ -13,7 +13,7 @@ import tempfile
+
+ def compile_terminfo(base):
+     with tempfile.TemporaryDirectory() as tdir:
+-        proc = subprocess.run(['tic', '-x', '-o' + tdir, 'terminfo/kitty.terminfo'], check=True, stderr=subprocess.PIPE)
++        proc = subprocess.run(['gtic', '-x', '-o' + tdir, 'terminfo/kitty.terminfo'], check=True, stderr=subprocess.PIPE)
+         regex = '^"terminfo/kitty.terminfo", line [0-9]+, col [0-9]+, terminal \'xterm-kitty\': older tic versions may treat the description field as an alias$'
+         for error in proc.stderr.decode('utf-8').splitlines():
+             if not re.match(regex, error):
+diff --git a/glfw/glfw.py b/glfw/glfw.py
+index 3cd95f30..c81047b8 100755
+--- a/glfw/glfw.py
++++ b/glfw/glfw.py
+@@ -72,8 +72,8 @@ def init_env(env: Env, pkg_config: Callable, at_least_version: Callable, test_co
+     ans.all_headers = [x for x in os.listdir(base) if x.endswith('.h')]
+ 
+     if module in ('x11', 'wayland'):
+-        ans.cflags.append('-pthread')
+-        ans.ldpaths.extend('-pthread -lm'.split())
++        ans.cflags.append('-pthreads')
++        ans.ldpaths.extend('-pthreads -lm'.split())
+         if not is_openbsd:
+             ans.ldpaths.extend('-lrt -ldl'.split())
+         at_least_version('xkbcommon', 0, 5)
+diff --git a/kittens/choose/choose-data-types.h b/kittens/choose/choose-data-types.h
+index d6634e26..ca0a60a9 100644
+--- a/kittens/choose/choose-data-types.h
++++ b/kittens/choose/choose-data-types.h
+@@ -26,7 +26,9 @@ typedef SSIZE_T ssize_t;
+ 
+ #include "vector.h"
+ 
++#ifdef ISWINDOWS
+ typedef uint8_t len_t;
++#endif
+ typedef uint32_t text_t;
+ 
+ #define LEN_MAX UINT8_MAX
+diff --git a/kitty/child.c b/kitty/child.c
+index b539bbca..995ff0a0 100644
+--- a/kitty/child.c
++++ b/kitty/child.c
+@@ -95,7 +95,7 @@ spawn(PyObject *self UNUSED, PyObject *args) {
+             // Establish the controlling terminal (see man 7 credentials)
+             int tfd = open(name, O_RDWR);
+             if (tfd == -1) exit_on_err("Failed to open controlling terminal");
+-#ifdef TIOCSCTTY
++#if defined(TIOCSCTTY) && !__sun
+             // On BSD open() does not establish the controlling terminal
+             if (ioctl(tfd, TIOCSCTTY, 0) == -1) exit_on_err("Failed to set controlling terminal with TIOCSCTTY");
+ #endif
+diff --git a/kitty/data-types.c b/kitty/data-types.c
+index 0509c9bb..abe8c17a 100644
+--- a/kitty/data-types.c
++++ b/kitty/data-types.c
+@@ -26,6 +26,18 @@
+ #endif
+ #include "monotonic.h"
+ 
++#ifdef __sun
++void
++cfmakeraw(struct termios *tio)
++{
++       tio->c_iflag &= ~(IGNBRK|BRKINT|PARMRK|ISTRIP|INLCR|IGNCR|ICRNL|IXON);
++       tio->c_oflag &= ~OPOST;
++       tio->c_lflag &= ~(ECHO|ECHONL|ICANON|ISIG|IEXTEN);
++       tio->c_cflag &= ~(CSIZE|PARENB);
++       tio->c_cflag |= CS8;
++}
++#endif
++
+ #ifdef __APPLE__
+ #include <libproc.h>
+ 
+diff --git a/launcher.c b/launcher.c
+index eb307cd4..a2383751 100644
+--- a/launcher.c
++++ b/launcher.c
+@@ -166,6 +166,15 @@ read_exe_path(char *exe, size_t buf_sz) {
+     fprintf(stderr, "kitty not found in PATH aborting\n");
+     return false;
+ }
++#elif defined(__sun)
++static inline bool
++read_exe_path(char *exe, size_t buf_sz) {
++    pid_t p = getpid();
++    char path[256];
++    snprintf(path, 256, "/proc/%d/path/a.out", p);
++    if (!safe_realpath(path, exe, buf_sz)) { fprintf(stderr, "Failed to read /proc/%d/path/a.out\n", p); return false; }
++    return true;
++}
+ 
+ #else
+
+@@ -179,6 +188,10 @@ read_exe_path(char *exe, size_t buf_sz) {
+ int main(int argc, char *argv[]) {
+     char exe[PATH_MAX+1] = {0};
+     const char *lc_ctype = NULL;
++#ifdef __sun
++    /* nasty XKB bug in GLFW3 */
++    putenv("XKB_DEFAULT_RULES=base");
++#endif
+ #ifdef __APPLE__
+     lc_ctype = getenv("LC_CTYPE");
+ #endif
+ 
+diff --git a/setup.py b/setup.py
+index d09cad07..5bdd68cc 100755
+--- a/setup.py
++++ b/setup.py
+@@ -327,7 +327,7 @@ def init_env(
+ def kitty_env() -> Env:
+     ans = env.copy()
+     cflags = ans.cflags
+-    cflags.append('-pthread')
++    cflags.append('-pthreads')
+     # We add 4000 to the primary version because vim turns on SGR mouse mode
+     # automatically if this version is high enough
+     cppflags = ans.cppflags
+@@ -628,7 +628,7 @@ def compile_c_extension(
+     # Old versions of clang don't like -pthread being passed to the linker
+     # Don't treat linker warnings as errors (linker generates spurious
+     # warnings on some old systems)
+-    unsafe = {'-pthread', '-Werror', '-pedantic-errors'}
++    unsafe = {'-pthreads', '-Werror', '-pedantic-errors'}
+     linker_cflags = list(filter(lambda x: x not in unsafe, kenv.cflags))
+     cmd = [kenv.cc] + linker_cflags + kenv.ldflags + objects + kenv.ldpaths + ['-o', dest]
+ 
+@@ -680,7 +680,7 @@ def compile_glfw(compilation_database: CompilationDatabase) -> None:
+ def kittens_env() -> Env:
+     kenv = env.copy()
+     cflags = kenv.cflags
+-    cflags.append('-pthread')
++    cflags.append('-pthreads')
+     cflags.append('-Ikitty')
+     pylib = get_python_flags(cflags)
+     kenv.ldpaths += pylib
+@@ -741,7 +741,7 @@ def safe_makedirs(path: str) -> None:
+ 
+ 
+ def build_launcher(args: Options, launcher_dir: str = '.', bundle_type: str = 'source') -> None:
+-    cflags = '-Wall -Werror -fpie'.split()
++    cflags = '-Wall -Werror'.split()
+     cppflags = []
+     libs: List[str] = []
+     if args.profile or args.sanitize:
+@@ -845,7 +845,7 @@ def c(base_path: str, **kw: object) -> None:
+
+ def create_linux_bundle_gunk(ddir: str, libdir_name: str) -> None:
+     if not os.path.exists('docs/_build/html'):
+-        run_tool(['make', 'docs'])
++        run_tool(['gmake', 'docs'])
+     copy_man_pages(ddir)
+     copy_html_docs(ddir)
+     icdir = os.path.join(ddir, 'share', 'icons', 'hicolor', '256x256', 'apps')     
